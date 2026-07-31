@@ -5,6 +5,8 @@ import {
   Attachment,
   PipelineEvent,
 } from '../types';
+import { executeClientSidePipeline } from '../services/clientAIOrchestrator';
+
 
 interface ChatContextType {
   sessions: Session[];
@@ -194,6 +196,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       };
     });
 
+    let usedServer = false;
     try {
       const response = await fetch('/api/chat', {
         method: 'POST',
@@ -205,109 +208,169 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }),
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
+      if (response.ok) {
+        usedServer = true;
+        const reader = response.body?.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
 
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
+        if (reader) {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
 
-      if (reader) {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n\n');
+            buffer = lines.pop() || '';
 
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n\n');
-          buffer = lines.pop() || '';
-
-          for (const line of lines) {
-            const trimmed = line.trim();
-            const dataIndex = trimmed.indexOf('data: ');
-            if (dataIndex !== -1) {
-              const dataStr = trimmed.slice(dataIndex + 6).trim();
-              if (dataStr === '[DONE]') {
-                break;
-              }
-              try {
-                const parsed = JSON.parse(dataStr);
-
-                if (parsed.type === 'event') {
-                  const evt: PipelineEvent = parsed.event;
-                  setActiveEvents((prev) => [...prev, evt]);
-                  setMessagesMap((prev) => {
-                    const current = prev[activeSessionId] || [];
-                    return {
-                      ...prev,
-                      [activeSessionId]: current.map((m) =>
-                        m.id === assistantMsgId
-                          ? { ...m, events: [...(m.events || []), evt] }
-                          : m
-                      ),
-                    };
-                  });
-                } else if (parsed.type === 'chunk') {
-                  setStreamingText((prev) => prev + parsed.text);
-                  setMessagesMap((prev) => {
-                    const current = prev[activeSessionId] || [];
-                    return {
-                      ...prev,
-                      [activeSessionId]: current.map((m) =>
-                        m.id === assistantMsgId
-                          ? { ...m, content: m.content + parsed.text }
-                          : m
-                      ),
-                    };
-                  });
-                } else if (parsed.type === 'complete') {
-                  setMessagesMap((prev) => {
-                    const current = prev[activeSessionId] || [];
-                    return {
-                      ...prev,
-                      [activeSessionId]: current.map((m) =>
-                        m.id === assistantMsgId
-                          ? {
-                              ...m,
-                              intent: parsed.intent,
-                              agentsUsed: parsed.agentsUsed,
-                              toolsUsed: parsed.toolsUsed,
-                              executionTimeMs: parsed.executionTimeMs,
-                            }
-                          : m
-                      ),
-                    };
-                  });
+            for (const line of lines) {
+              const trimmed = line.trim();
+              const dataIndex = trimmed.indexOf('data: ');
+              if (dataIndex !== -1) {
+                const dataStr = trimmed.slice(dataIndex + 6).trim();
+                if (dataStr === '[DONE]') {
+                  break;
                 }
-              } catch (e) {
-                // Ignore parse errors on incomplete chunks
+                try {
+                  const parsed = JSON.parse(dataStr);
+
+                  if (parsed.type === 'event') {
+                    const evt: PipelineEvent = parsed.event;
+                    setActiveEvents((prev) => [...prev, evt]);
+                    setMessagesMap((prev) => {
+                      const current = prev[activeSessionId] || [];
+                      return {
+                        ...prev,
+                        [activeSessionId]: current.map((m) =>
+                          m.id === assistantMsgId
+                            ? { ...m, events: [...(m.events || []), evt] }
+                            : m
+                        ),
+                      };
+                    });
+                  } else if (parsed.type === 'chunk') {
+                    setStreamingText((prev) => prev + parsed.text);
+                    setMessagesMap((prev) => {
+                      const current = prev[activeSessionId] || [];
+                      return {
+                        ...prev,
+                        [activeSessionId]: current.map((m) =>
+                          m.id === assistantMsgId
+                            ? { ...m, content: m.content + parsed.text }
+                            : m
+                        ),
+                      };
+                    });
+                  } else if (parsed.type === 'complete') {
+                    setMessagesMap((prev) => {
+                      const current = prev[activeSessionId] || [];
+                      return {
+                        ...prev,
+                        [activeSessionId]: current.map((m) =>
+                          m.id === assistantMsgId
+                            ? {
+                                ...m,
+                                intent: parsed.intent,
+                                agentsUsed: parsed.agentsUsed,
+                                toolsUsed: parsed.toolsUsed,
+                                executionTimeMs: parsed.executionTimeMs,
+                              }
+                            : m
+                        ),
+                      };
+                    });
+                  }
+                } catch (e) {
+                  // Ignore parse errors on incomplete chunks
+                }
               }
             }
           }
         }
+      } else {
+        console.warn(`[AI Radar OS] Servidor /api/chat respondeu HTTP ${response.status}. Ativando Modo Híbrido Estático (Netlify/Client-Side)...`);
       }
     } catch (err) {
-      console.error('Erro na comunicação com AI Radar OS:', err);
-      setMessagesMap((prev) => {
-        const current = prev[activeSessionId] || [];
-        return {
-          ...prev,
-          [activeSessionId]: current.map((m) =>
-            m.id === assistantMsgId
-              ? {
-                  ...m,
-                  content:
-                    '❌ Ocorreu um erro ao processar sua solicitação. Verifique a conexão do servidor e tente novamente.',
-                  error: true,
-                }
-              : m
-          ),
-        };
-      });
-    } finally {
-      setIsStreaming(false);
-      setStreamingText('');
+      console.warn('[AI Radar OS] Falha ao contatar /api/chat (Netlify estático / servidor offline). Ativando Modo Híbrido Client-Side:', err);
     }
+
+    if (!usedServer) {
+      try {
+        await executeClientSidePipeline({
+          sessionId: activeSessionId,
+          content,
+          attachments,
+          onEvent: (evt) => {
+            setActiveEvents((prev) => [...prev, evt]);
+            setMessagesMap((prev) => {
+              const current = prev[activeSessionId] || [];
+              return {
+                ...prev,
+                [activeSessionId]: current.map((m) =>
+                  m.id === assistantMsgId
+                    ? { ...m, events: [...(m.events || []), evt] }
+                    : m
+                ),
+              };
+            });
+          },
+          onChunk: (text) => {
+            setStreamingText((prev) => prev + text);
+            setMessagesMap((prev) => {
+              const current = prev[activeSessionId] || [];
+              return {
+                ...prev,
+                [activeSessionId]: current.map((m) =>
+                  m.id === assistantMsgId
+                    ? { ...m, content: m.content + text }
+                    : m
+                ),
+              };
+            });
+          },
+          onComplete: (meta) => {
+            setMessagesMap((prev) => {
+              const current = prev[activeSessionId] || [];
+              return {
+                ...prev,
+                [activeSessionId]: current.map((m) =>
+                  m.id === assistantMsgId
+                    ? {
+                        ...m,
+                        intent: meta.intent,
+                        agentsUsed: meta.agentsUsed,
+                        toolsUsed: meta.toolsUsed,
+                        executionTimeMs: meta.executionTimeMs,
+                      }
+                    : m
+                ),
+              };
+            });
+          },
+        });
+      } catch (clientErr) {
+        console.error('[AI Radar OS] Erro fatal no pipeline Client-Side:', clientErr);
+        setMessagesMap((prev) => {
+          const current = prev[activeSessionId] || [];
+          return {
+            ...prev,
+            [activeSessionId]: current.map((m) =>
+              m.id === assistantMsgId
+                ? {
+                    ...m,
+                    content:
+                      '❌ Ocorreu um erro ao processar sua solicitação. Verifique sua chave de API e conexão.',
+                    error: true,
+                  }
+                : m
+            ),
+          };
+        });
+      }
+    }
+
+    setIsStreaming(false);
+    setStreamingText('');
   };
 
   return (

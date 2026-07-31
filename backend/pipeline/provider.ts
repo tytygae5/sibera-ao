@@ -28,7 +28,7 @@ export async function streamModelResponse(
   let fullResponse = '';
 
   if (client) {
-    const modelsToTry = ['gemini-3.6-flash', 'gemini-3.1-pro-preview', 'gemini-flash-latest'];
+    const modelsToTry = ['gemini-2.5-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest'];
     for (const modelName of modelsToTry) {
       try {
         const responseStream = await client.models.generateContentStream({
